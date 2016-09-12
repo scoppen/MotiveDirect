@@ -37,11 +37,13 @@ public class MotiveDirect : MonoBehaviour {
 	public static double currentTimestamp = 0.0f;
 
 	public bool showDebugObject = true;
+	public bool multicastEnabled = false;
 
-	private IPEndPoint mRemoteIpEndPoint;
+	private IPEndPoint mRemoteIpDataEndPoint;
 	private Socket     mDataListner;
 	private byte[]     mDataReceiveBuffer;
 
+	private IPEndPoint mRemoteIpCommandEndPoint;
 	private Socket     mCommandListner;
 	private byte[]     mCommandReceiveBuffer;
 
@@ -269,15 +271,21 @@ public class MotiveDirect : MonoBehaviour {
 		mCommandReceiveBuffer = new byte[MAX_PACKETSIZE];
 
 		//initialize data socket
-		mRemoteIpEndPoint = new IPEndPoint(IPAddress.Parse(hostIP), commandPort);
-		mDataListner = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-		mDataListner.Bind(new IPEndPoint(IPAddress.Any, dataPort));
+		mRemoteIpCommandEndPoint = new IPEndPoint(IPAddress.Parse(hostIP), commandPort);
+		mRemoteIpDataEndPoint = new IPEndPoint(IPAddress.Parse(hostIP), dataPort);
 
-		//join multicast group
-		IPAddress mulIP=IPAddress.Parse(multicastIP);
-		mDataListner.SetSocketOption(SocketOptionLevel.IP,
-			SocketOptionName.AddMembership,
-			new MulticastOption(mulIP,IPAddress.Any));
+		mDataListner = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+
+		//join multicast group if selected, otherwise use unicast
+		if (multicastEnabled) {
+			mDataListner.Bind(new IPEndPoint(IPAddress.Any, dataPort));
+			IPAddress mulIP=IPAddress.Parse(multicastIP);
+			mDataListner.SetSocketOption(SocketOptionLevel.IP,
+				SocketOptionName.AddMembership,
+				new MulticastOption(mulIP,IPAddress.Any));
+		} else {
+			mDataListner.Connect(mRemoteIpDataEndPoint);
+		}
 	
 		mDataListner.Blocking          = false;
 		mDataListner.ReceiveBufferSize = SOCKET_BUFSIZE;
@@ -354,6 +362,10 @@ public class MotiveDirect : MonoBehaviour {
 	}	
 	private void commandThreadLoop()
 	{
+		// Initiate communications (seems to need ping message after first modeldef_request)
+		_send_modeldef_request();
+		_send_ping();
+
 		while (isRunning)
 		{ 
 			if(!modelDefUpdated){
@@ -624,6 +636,9 @@ public class MotiveDirect : MonoBehaviour {
 							if(rb == null){
 								rb = new GameObject(rbName);
 								rb.transform.parent = transform;
+								// SWC: NOTE - to draw something other than a cube to represent the tracked object,
+								// use a resource mesh and load as follows:
+								// GameObject debugObject = (GameObject)Instantiate(Resources.Load("<mesh resource name here>"));
 								GameObject debugObject = GameObject.CreatePrimitive(PrimitiveType.Cube);
 								debugObject.transform.localScale *= 0.1f;
 								debugObject.transform.parent = rb.transform;
@@ -718,7 +733,22 @@ public class MotiveDirect : MonoBehaviour {
 			IntPtr ptr = Marshal.AllocHGlobal(4);
 			Marshal.StructureToPtr(packet, ptr, true);
 			Marshal.Copy(ptr, msg, 0,4);
-			mCommandListner.SendTo(msg, mRemoteIpEndPoint);
+			mCommandListner.SendTo(msg, mRemoteIpCommandEndPoint);
+			Marshal.FreeHGlobal(ptr);
+		}
+	}
+
+	private void _send_ping(){
+		if(mCommandListner != null){
+			PACKET_FORMAT packet = new PACKET_FORMAT();
+			packet.header.iMessage = NAT_PING;
+			packet.header.nDataBytes = 5;
+
+			byte[] msg = new byte[9];
+			IntPtr ptr = Marshal.AllocHGlobal(9);
+			Marshal.StructureToPtr(packet, ptr, true);
+			Marshal.Copy(ptr, msg, 0, 4);
+			mCommandListner.SendTo(msg, mRemoteIpCommandEndPoint);
 			Marshal.FreeHGlobal(ptr);
 		}
 	}
@@ -1070,9 +1100,11 @@ public class MotiveDirect : MonoBehaviour {
 		PACKET_HEADER_FORMAT packetHeader;
 		_unpack_head<PACKET_HEADER_FORMAT>(payload, ref offset, out packetHeader);
 		if(packetHeader.iMessage == NAT_PINGRESPONSE){
-			SenderData sender;
-			_unpack_sender(payload, ref offset, out sender);
-			msg = sender;
+			//SWC: I don't believe 'SenderData' is returned with NAT_PINGRESPONSE - crashes if uncommented
+			//SenderData sender;
+			//_unpack_sender(payload, ref offset, out sender);
+			//msg = sender;
+			msg = null;
 			msgtype = NAT_PINGRESPONSE;
 			return;
 		}
